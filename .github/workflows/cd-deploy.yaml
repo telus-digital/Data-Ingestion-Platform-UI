@@ -1,0 +1,133 @@
+name: GCP Custom Cloud Deploy
+on: 
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: test # use your np project id here (for deployments to np and pr clusters alike)
+  DELIVERY_PIPELINE_NAME: "test"  # the name of your delivery pipeline in Google Cloud Deploy
+  REGION: northamerica-northeast1 # Region to create cloud deploy pipeline
+  NAMESPACE: test # Gke namespace where the application is deployed
+  IMAGE_PATH: northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/applications/test/test # Should be the same as in your helm values file, and skaffold build
+  SERVICE_ACCOUNT: cicd-service-account@test.iam.gserviceaccount.com # Cicd service account used to deploy the application
+  GCS_SOURCE_STAGING_DIR: gs://test_clouddeploy/source # Google Cloud Deploy's staging location for resource file
+  IMAGE_TAG: "${{ github.sha }}" # Image tag to be used in the deployment
+  RELEASE_NAME: "r-${{ github.sha }}-${{ github.run_number }}-${{ github.run_attempt }}" # Unique Release name to be used in the deployment
+
+jobs:
+  cloud-deploy-np:
+    name: Cloud deploy create
+    runs-on: [ubuntu-latest]
+    environment: np
+    outputs:
+      new_tag: "${{ env.IMAGE_TAG }}"
+      release_name: "${{ env.RELEASE_NAME }}"
+    permissions:
+      contents: 'write'
+      pull-requests: 'write'
+      id-token: 'write'
+    steps: 
+      # Check out your GitHub repo into the container executing these steps
+      - name: "Cloning repo"
+        uses: actions/checkout@v3
+
+      # Authenticate to the Google Cloud platform using Workload Identity Federation, the most secure and preferred
+      # way to connect to our Google Cloud Platform from GitHub.
+      # The workload_identity_provider is managed for the entire cluster and you don't need to worry about it.
+      # The service_account must be setup within your Google Project. This is done by the Cloud CoE as part of
+      # project onboarding, so you don't need to worry about it beyond enabling GitHub actions as part of your
+      # Google Cloud project onboarding request.
+      - id: auth
+        name: Authenticate to Google using WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/356405425970/locations/global/workloadIdentityPools/tdx-github-wif/providers/tdx-github-provider"
+          service_account: "${{ env.SERVICE_ACCOUNT }}"
+          project_id: "${{ env.PROJECT_ID }}"
+          token_format: 'access_token'
+      
+      # The GCloud CLI must be installed and configured in the container to enable subsequent steps
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: "${{ env.PROJECT_ID }}"
+
+      # Authenticate Docker with the Google Container Registry or Artifact Registry you are going to be pushing your built images to.
+      - name: Configure Docker
+        run: |-
+          IMAGE_PATH="${{ env.IMAGE_PATH }}"
+          # Extract the registry domain from IMAGE_PATH
+          REGISTRY=$(echo $IMAGE_PATH | awk -F/ '{print $1}')
+          
+          echo "Configuring Docker authentication for registry: $REGISTRY"
+          
+          # Authenticate Docker with the appropriate registry
+          gcloud --quiet auth configure-docker $REGISTRY
+      
+      # Create or update the Cloud Deploy Pipeline based on your clouddeploy.yaml file config
+      - name: Create or update Cloud Deploy Pipeline
+        run: |-
+          gcloud deploy apply --file clouddeploy.yaml --region $REGION --project $PROJECT_ID
+
+      # Install Skaffold - a tool that handles building, pushing, and deploying your application.
+      - name: Install Skaffold
+        run: |
+          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/v2.14.0/skaffold-linux-amd64
+          chmod +x skaffold
+          sudo mv skaffold /usr/local/bin
+      
+      # Skaffold build - this will build your application images and push hem to the Google Container Registry or Artifact Registry authenticated with above.
+      - name: Skaffold build
+        run: |-
+          skaffold build -f skaffold.yaml -p "np" --file-output artifacts.json --tag $TAG 
+        env:
+          TAG: "${{ env.IMAGE_TAG }}"
+
+      # Create a release in Cloud Deploy to the first non-production environment.
+      - name: Create Release
+        run: |-
+          gcloud deploy releases create "$RELEASE_NAME" \
+            --delivery-pipeline="$DELIVERY_PIPELINE_NAME" \
+            --region="$REGION" \
+            --project="$PROJECT_ID" \
+            --source=. \
+            --gcs-source-staging-dir="$GCS_SOURCE_STAGING_DIR" \
+            --skaffold-file=skaffold.yaml \
+            --images="${{ env.IMAGE_PATH }}=${{ env.IMAGE_PATH }}:${{ env.IMAGE_TAG }}" \
+            --to-target=np
+
+      # Poll Cloud Deploy until the np rollout reaches a terminal state. Fails the job if the rollout fails,
+      # is cancelled/halted, or doesn't finish in time (check the Cloud Console for paused/pending-approval rollouts).
+      - name: Check status
+        id: status_check_np
+        env:
+          TARGET_ID: np
+          TIMEOUT_SECONDS: "600"
+          POLL_INTERVAL_SECONDS: "10"
+        run: |-
+          deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+          status=""
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            status=$(gcloud deploy rollouts list \
+              --delivery-pipeline="$DELIVERY_PIPELINE_NAME" \
+              --release="$RELEASE_NAME" \
+              --region="$REGION" \
+              --project="$PROJECT_ID" \
+              --filter="targetId=$TARGET_ID" \
+              --sort-by="~createTime" \
+              --limit=1 \
+              --format="value(state)")
+            echo "Rollout state for $TARGET_ID: ${status:-<not created yet>}"
+            case "$status" in
+              SUCCEEDED)
+                echo "status=SUCCEEDED" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+              FAILED|CANCELLED|HALTED|PENDING_APPROVAL|APPROVAL_REJECTED)
+                echo "status=$status" >> "$GITHUB_OUTPUT"
+                echo "Exiting because deployment ended in state $status"
+                exit 1 ;;
+            esac
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
+          echo "status=TIMEOUT" >> "$GITHUB_OUTPUT"
+          echo "Timed out after ${TIMEOUT_SECONDS}s waiting for rollout (last state: ${status:-none})"
+          exit 1
