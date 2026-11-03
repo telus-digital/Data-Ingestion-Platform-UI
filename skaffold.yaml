@@ -1,0 +1,67 @@
+# This file configures Skaffold, a tool for building, pushing, deploying, and verifying your application.
+# For more info, see: https://skaffold.dev/docs/ for more info about each section.
+apiVersion: skaffold/v4beta7
+kind: Config
+metadata:
+  name: "my-service" # The name of your application as recognized by Skaffold
+# The build section indicates how to build your application images.
+build:
+  local:
+    concurrency: 2 # Number of concurrent artifact builds
+  tagPolicy:
+    gitCommit:
+      ignoreChanges: true # Use the git commit SHA as the image tag, ignoring uncommitted changes
+  artifacts:
+    # Each artifact defines a container image to build and push.
+    # build a single image for all environments
+    - image: northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/applications/my-service/my-service
+      context: .
+      docker:
+        dockerfile: 'Dockerfile'
+        buildArgs:
+          NPMRC: "{{.NPMRC}}"
+          NPM_TOKEN: "{{.NPM_TOKEN}}"
+          NPM_REGISTRY: "{{.NPM_REGISTRY}}"
+          ENV_FILE: "[Overriden via profile patches (td-gke-digital workloads)]"
+        cacheFrom:
+          - northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/applications/my-service/my-service
+# The deploy section tells Skaffold how to deploy your application to Kubernetes.
+deploy:
+  cloudrun:
+    projectid: my-project-np-123456
+    region: northamerica-northeast1
+manifests:
+  helm:
+    releases:
+      - name: "[Overriden via profile patches]"
+        remoteChart: "oci://northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/charts/cdo-cloudrun-deployment"
+        valuesFiles:
+          - "[Overriden via profile patches]" # The values file for this environment (overridden by profiles for each env)
+        version:
+# The verify section defines a job to run after deployment to validate the rollout.
+verify:
+  - name: "my-service-verify" # Name of the verify job
+    container:
+      name: "my-service-verify-job" # Name of the container running the verify job
+      image: northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/applications/gke-migration-test/dynatrace-metric-verifier:v0-0-12 # The image to use for verification. Exit code 0 indicates a successful verification, non-zero : a failed one.
+      command: ["python", "dynatrace_verify.py"] # The command to run in the verify container
+      args: ["--canary_dt_service_id", "{{ .Values.verifyDynatraceCanaryServiceId }}", "--baseline_dt_service_id", "{{ .Values.verifyDynatraceBaselineServiceId }}", "--failure_threshold", "{{ .Values.verifyDynatraceFailureThreshold }}", "--dt_environment_id", "{{ .Values.verifyDynatraceEnvironmentId }}", "--dt_pat_secret_resource_name", "{{ .Values.verifyDynatracePATSecretId }}", "--initial_delay", "{{ .Values.verifyDynatraceInitialDelay }}", "--query_lookback", "{{ .Values.verifyDynatraceQueryLookback }}", "--metrics", "{{ .Values.verifyDynatraceMetrics }}"] # Arguments for the verify command
+    executionMode:
+      local: {} # Run the verify job locally (not in-cluster)
+# Profiles allow you to customize Skaffold behavior for each environment.
+# Each profile can specify skaffold config values to ovewrite with environment-specific settings.
+profiles:
+  - name: "np" # Profile for the non-production environment
+    patches:
+      - op: replace
+        path: /manifests/helm/releases/0/name
+        value: "my-service-np" # Set the Helm release name for this env
+      - op: replace
+        path: /manifests/helm/releases/0/valuesFiles
+        value: [./helm-values/cloud-run/np/values.yaml] # Use the env-specific values file
+      - op: replace
+        path: /deploy/cloudrun/projectid
+        value: "my-project-np-123456" # Set the projectId for cloud run deployments to production environments
+      - op: replace
+        path: /build/artifacts/0/docker/buildArgs/ENV_FILE
+        value: ".env.np" # Use the env-specific .env file for the build

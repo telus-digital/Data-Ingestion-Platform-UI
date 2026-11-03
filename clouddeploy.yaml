@@ -1,0 +1,65 @@
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: Automation # Defines an automation rule for advancing canary rollout stages (https://cloud.google.com/deploy/docs/automation-rules#advancerollout_rule)
+metadata:
+  name: "my-service/advance-rollout-50"
+description: advance stage for all rollouts in my-service at the canary-50 stage of release
+suspended: true # If true, this automation will not run
+serviceAccount: cicd-service-account@my-project-np-123456.iam.gserviceaccount.com # Service account used to execute this automation
+selector:
+  targets:
+    - id: np # Target environment where this automation applies
+rules:
+  - advanceRolloutRule:
+      name: "advance-rollout-50" # Name of the rollout advancement rule
+      sourcePhases:
+        - "canary-50" # The canary phase this rule advances from
+      wait: "0m" # How long to wait before advancing to the next phase
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: Automation # Defines an automation rule for automatic rollback on failure (https://cloud.google.com/deploy/docs/automation-rules#repairrollout_rule)
+metadata:
+  name: "my-service/rollback-automation"
+description: Rollback rollouts for my-service
+suspended: true # If true, this automation will not run
+serviceAccount: cicd-service-account@my-project-np-123456.iam.gserviceaccount.com # Service account used to execute this automation
+selector:
+  targets:
+    - id: np # Target environment where this rollback applies
+rules:
+  - repairRolloutRule:
+      name: "rollback-automation" # Name of the rollback rule
+      repairPhases:
+        - rollback:
+            destinationPhase: "stable" # Roll back to the 'stable' phase if a failure occurs
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: DeliveryPipeline # Defines the overall deployment pipeline and its stages (https://cloud.google.com/deploy/docs/config-files#structure_of_a_delivery_pipeline_configuration_file)
+metadata:
+  name: "my-service" # Name of the delivery pipeline
+  annotations: {} # Optional metadata annotations
+  labels: {}      # Optional metadata labels
+description: Deploy my-service # Human-readable description of this pipeline
+serialPipeline:
+  stages:
+    - targetId: np # The environment (target) this stage deploys to
+      profiles: [np] # Skaffold profiles to use for this stage
+---
+apiVersion: deploy.cloud.google.com/v1
+kind: Target # Defines a deployment target (GKE cluster/environment). (https://cloud.google.com/deploy/docs/config-files#target_definitions)
+metadata:
+  name: np # Name of the target environment
+  annotations: {} # Optional metadata annotations
+  labels: {}      # Optional metadata labels
+description: Non-production environment # Description of this target
+requireApproval: false # If true, manual approval is required before deploying to this target
+
+run:
+  location: projects/my-project-np-123456/locations/northamerica-northeast1
+executionConfigs:
+  - defaultPool:
+      serviceAccount: cicd-service-account@my-project-np-123456.iam.gserviceaccount.com # Service account used for deploy/verify/render
+    usages:
+      - DEPLOY # Allows deployment actions
+      - VERIFY # Allows verification actions
+      - RENDER # Allows manifest rendering actions

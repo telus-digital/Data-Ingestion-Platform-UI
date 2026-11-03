@@ -1,0 +1,27 @@
+# This is a basic helm values file using the cdo-cloudrun-deployment chart (https://github.com/telus/cdo-gke-charts/tree/main/cdo-cloudrun-deployment). 
+# Please refer to the helm template code/documentation for an up-to-date list of available parameters.
+applicationName: my-service
+
+type: service
+
+environment: np
+
+image:
+  repository: northamerica-northeast1-docker.pkg.dev/cio-gke-devops-e4993356/applications/my-service/my-service
+  tag: latest
+
+# todo: replace this with a dedicated service account configured with the essentials for your cloud run application
+# note: the deploying service account must have the "iam.serviceAccounts.actAs" permission on the service account being used here
+serviceAccountName: cicd-service-account@my-project-np-123456.iam.gserviceaccount.com
+
+ingress: internal # Options: internal, internal-and-cloud-load-balancing, all
+
+iap:
+  enabled: true # Identity-Aware Proxy configuration restricsting access to users authenticated via IAP
+
+invokerIam:
+  disabled: false # Keeps IAM-based service invocation checks enabled, ensuring only authorized users or services (ie. with the "Cloud Run Invoker" role) can call the service directly
+
+traffic: {} # Leave as empty/default traffic block to allow Cloud Deploy to control percentages during canary deployments
+
+sessionAffinity: false # Enables/disables session affinity for traffic served to cloud run service revisions via the "run.googleapis.com/sessionAffinity" annotation (Options: true, false)
